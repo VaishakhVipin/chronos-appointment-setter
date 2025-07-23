@@ -1,4 +1,6 @@
-from fastapi import APIRouter, WebSocket
+from fastapi import APIRouter, WebSocket, Request, Response
+from fastapi.responses import PlainTextResponse
+from xml.etree.ElementTree import Element, tostring
 import asyncio
 from services.assembly import stream_transcribe
 from core.agent import agent_loop
@@ -34,6 +36,34 @@ async def handle_stream(websocket: WebSocket):
     finally:
         await websocket.close()
         print("🔴 WebSocket closed")
+
+@router.post("/twilio/voice")
+async def twilio_voice(request: Request):
+    # Respond with TwiML to greet and record the call
+    response = Element("Response")
+    say = Element("Say")
+    say.text = "Hello! This call will be recorded for scheduling. Please state your name and reason for calling after the beep."
+    response.append(say)
+    record = Element("Record", {
+        "action": request.url_for("twilio_voice_recording"),
+        "method": "POST",
+        "maxLength": "120",
+        "playBeep": "true"
+    })
+    response.append(record)
+    hangup = Element("Hangup")
+    response.append(hangup)
+    xml_str = tostring(response, encoding="unicode")
+    return PlainTextResponse(xml_str, media_type="application/xml")
+
+@router.post("/twilio/voice/recording", name="twilio_voice_recording")
+async def twilio_voice_recording(request: Request):
+    form = await request.form()
+    recording_url = form.get("RecordingUrl")
+    caller = form.get("From")
+    # TODO: Send recording_url to AssemblyAI for transcription
+    print(f"[twilio] Received recording from {caller}: {recording_url}")
+    return PlainTextResponse("<Response><Say>Thank you. Your message has been received.</Say></Response>", media_type="application/xml")
 
 @router.post("/send_daily_digest")
 def send_daily_digest(clear_log: bool = False):
