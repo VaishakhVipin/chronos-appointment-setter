@@ -2,9 +2,10 @@
 import os
 import requests
 from dotenv import load_dotenv
+import asyncio
 load_dotenv()
 
-def speak(text: str, filename: str = "response.wav") -> str:
+def speak_sync(text: str, filename: str = "response.wav") -> str:
     if not text or not isinstance(text, str) or not text.strip():
         print("❌ TTS Error: text must be a non-empty string.")
         return ""
@@ -32,3 +33,6 @@ def speak(text: str, filename: str = "response.wav") -> str:
     except Exception as e:
         print("❌ TTS Error:", e)
         return ""
+
+async def speak(text: str, filename: str = "response.wav") -> str:
+    return await asyncio.to_thread(speak_sync, text, filename)

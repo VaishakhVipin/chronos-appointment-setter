@@ -2,30 +2,60 @@ import os
 import google.generativeai as genai
 from dotenv import load_dotenv
 import json
+import asyncio
+from functools import lru_cache
 
 load_dotenv()
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel("gemini-2.0-flash")
 
-# --- INTENT PARSING ---
-def parse_intent(user_input: str):
+# Pre-load/warm-up the model (dummy call)
+def _warmup():
+    try:
+        model.generate_content("Hello! This is a warmup.")
+    except Exception:
+        pass
+_warmup()
+
+# Simple in-memory cache for prompt/response pairs
+_gemini_cache = {}
+
+def _cache_key(prompt):
+    return hash(prompt)
+
+async def async_generate_content(prompt, streaming=False):
+    key = _cache_key(prompt)
+    if key in _gemini_cache:
+        return _gemini_cache[key]
+    # Use streaming if available
+    if hasattr(model, 'generate_content'):
+        if streaming:
+            # If streaming is supported, use it (Gemini API may not support this yet)
+            res = model.generate_content(prompt, stream=True)
+            # Collect the streamed response
+            raw = "".join([chunk.text for chunk in res])
+        else:
+            res = model.generate_content(prompt)
+            raw = res.text.strip()
+    else:
+        res = model.generate_content(prompt)
+        raw = res.text.strip()
+    _gemini_cache[key] = raw
+    return raw
+
+# --- INTENT & SLOT EXTRACTION (DETAILED GUIDELINES, CONCISE OUTPUT) ---
+async def parse_intent(user_input: str):
     prompt = f"""
-You're a backend AI agent for a voice scheduling system. Your job is to extract:
-1. The user's intent — only respond with 'book_call', 'cancel_call', or 'general_query'
-2. The most likely time the user wants (in plain text, e.g. 'Friday 6pm')
+You are an expert AI scheduling agent. Your job is to extract the user's intent (book_call, cancel_call, general_query), the most likely requested time (plain text), and the call duration (e.g. '15m', '30m', '1 hour', or null if not specified) from the following message. Be accurate and context-aware.
 
-Here's the user input:
-\"\"\"{user_input}\"\"\"
+User message:
+{user_input}
 
-Respond ONLY in this JSON format:
-{{
-  "intent": "...",
-  "datetime": "..."
-}}
+Respond in JSON:
+{{"intent":..., "datetime":..., "duration":...}}
 """
-    res = model.generate_content(prompt)
-    raw = res.text.strip()
+    raw = await async_generate_content(prompt)
     if raw.startswith('```'):
         raw = raw.split('\n', 1)[-1]
         if raw.endswith('```'):
@@ -33,27 +63,33 @@ Respond ONLY in this JSON format:
         raw = raw.strip()
     try:
         parsed = json.loads(raw)
-        return parsed.get("intent"), parsed.get("datetime")
+        return parsed.get("intent"), parsed.get("datetime"), parsed.get("duration")
     except Exception as e:
         print("❌ Error parsing Gemini output:", e)
         print("🔴 Raw:", raw)
-        return "unknown", "unknown"
+        return "unknown", "unknown", None
 
-# --- LLM REPLY GENERATION ---
-def generate_llm_reply(intent, slot, contact, business_context, error=None):
+# --- LLM REPLY GENERATION (DETAILED GUIDELINES, CONCISE OUTPUT) ---
+async def generate_llm_reply(intent, slot, contact, business_context, error=None, timezone=None):
     prompt = f"""
-You're a friendly scheduling assistant for {business_context['seller']}. Based on the intent and slot info below, generate a natural, helpful sentence to say back to the user.
+You are an AI scheduling assistant for {business_context['seller']}.
+Your job is to help users book, reschedule, or cancel calls as efficiently as possible.
+Guidelines:
+- Always confirm or mention the time zone when discussing or confirming a booking.
+- Be direct, concise, and only ask for what is needed to complete the booking.
+- Do not repeat information or add unnecessary politeness.
+- Never generate a verbose or epic response; keep it short and actionable.
+- If the user is booking, confirm the time, date, and time zone.
 
 Intent: {intent}
 Slot: {slot}
-Offer: {business_context['offer']}
-Seller: {business_context['seller']}
 Contact: {contact['name']} ({contact['role']})
+Offer: {business_context['offer']}
+Time zone: {timezone or 'America/New_York'}
 """
     if error:
-        prompt += f"\nError: {error}\nIf there is an error, suggest a helpful next step or alternative."
-    res = model.generate_content(prompt)
-    raw = res.text.strip()
+        prompt += f"\nError: {error}\nRespond with a short, actionable next step."
+    raw = await async_generate_content(prompt)
     if raw.startswith('```'):
         raw = raw.split('\n', 1)[-1]
         if raw.endswith('```'):
@@ -61,15 +97,19 @@ Contact: {contact['name']} ({contact['role']})
         raw = raw.strip()
     return raw
 
-# --- QUALIFICATION CLASSIFICATION ---
-def classify_qualification(user_utterance: str, business_context, qualification_profile):
+# --- QUALIFICATION CLASSIFICATION (DEEPER, STRICTER) ---
+async def classify_qualification(user_utterance: str, business_context, qualification_profile):
     prompt = f"""
-You are a qualification assistant for {business_context['seller']}.
-Here is the ideal client profile:
-{qualification_profile['ideal_user']}
-Non-ideal routes: {qualification_profile['non_ideal_routes']}
-
-Based on this user's message, are they a qualified prospect for our growth strategy call? If not, label them and suggest how to respond.
+You are a lead qualification AI for {business_context['seller']}.
+Guidelines:
+- Consider the user's business type, revenue, pain points, and intent.
+- Only qualify if the user matches the ideal client profile:
+  - Type: {qualification_profile['ideal_user']['type']}
+  - Revenue: {qualification_profile['ideal_user']['revenue']}
+  - Pain points: {', '.join(qualification_profile['ideal_user']['pain_points'])}
+- Be strict: do not qualify if any major criteria are missing or ambiguous.
+- If not qualified, route to the correct contact or ignore as appropriate.
+- Provide a short explanation of your reasoning in the JSON response.
 
 User message: "{user_utterance}"
 
@@ -80,8 +120,7 @@ Respond ONLY in this JSON format:
   "route_to": null or "Aryan" or "Ignore"
 }}
 """
-    res = model.generate_content(prompt)
-    raw = res.text.strip()
+    raw = await async_generate_content(prompt)
     if raw.startswith('```'):
         raw = raw.split('\n', 1)[-1]
         if raw.endswith('```'):
