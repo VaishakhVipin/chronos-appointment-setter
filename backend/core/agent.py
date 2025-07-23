@@ -12,6 +12,7 @@ import time
 import asyncio
 import re
 from typing import Tuple
+from services.twilio_sms import send_sms
 
 # Hardcoded business context
 BUSINESS_CONTEXT = {
@@ -256,6 +257,17 @@ async def agent_loop(user_utterance: str, session_id: str = 'simulate_call_user_
                                 "contact": contact["name"]
                             }
                             state["cancelled"] = False
+                            # --- Twilio SMS Notification ---
+                            from_number = os.getenv("TWILIO_PHONE_NUMBER")
+                            # Placeholder: set user_phone to the user's phone number after a successful call booking
+                            user_phone = None  # TODO: Set this to the user's phone number from booking/contact/session data
+                            if user_phone and from_number:
+                                sms_message = f"Your call with {contact['name']} is confirmed for {first_slot} ({os.getenv('TIMEZONE', 'America/New_York')}). Reply to this SMS if you need to reschedule."
+                                try:
+                                    sms_sid = send_sms(user_phone, sms_message, from_number)
+                                    print(f"[agent] SMS sent to {user_phone}, SID: {sms_sid}")
+                                except Exception as e:
+                                    print(f"[agent] Failed to send SMS: {e}")
                             response_text = await generate_llm_reply(intent, slot, contact, error=error)
                         else:
                             error = "No available slots"
