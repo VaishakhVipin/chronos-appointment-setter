@@ -44,5 +44,5 @@ if __name__ == "__main__":
     # Optionally, keep the manual debug_booking section for manual testing only, or comment it out.
     # --- Cal.com booking debug ---
     print("\n=== Cal.com Booking Debug ===")
-    print("[simulate_call] Skipped manual debug_booking: event_type_id is now determined dynamically based on user utterance duration.")
+    print("[simulate_call] Skipped manual debug_booking: event_type_id is now determined dynamically based on user utterance duration and v2 API is used via agent.py (book_slot_v2).")
     # If you want to manually test booking, use the new dynamic logic in agent_loop or caldotcom.get_event_type_id_by_duration
