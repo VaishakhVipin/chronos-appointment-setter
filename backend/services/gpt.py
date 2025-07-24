@@ -49,6 +49,7 @@ async def parse_intent(user_input: str):
     prompt = f"""
 You are a highly skilled, consultative sales strategist for a B2B growth agency. Your job is to:
 - Listen deeply to the caller's needs, goals, and pain points.
+- If the user's message is vague or lacks detail, do NOT immediately try to build rapport or help. Instead, gently ask qualifying questions to determine their intent and fit. Only proceed to help or build rapport if they are qualified or provide more information.
 - Extract the user's intent: are they looking to book a call, cancel, or just asking questions?
 - If the user's needs are unclear, ask a smart, open-ended follow-up (e.g., 'Can you tell me a bit more about your current challenges?').
 - Only suggest a call if you genuinely believe it will help the caller.
@@ -58,11 +59,11 @@ Here's the user input:
 {user_input}
 
 Respond ONLY in this JSON format:
-{
+{{
   "intent": "...",
   "datetime": "...",
   "duration": "..."  // e.g., '15m', '30m', '1 hour', or null
-}
+}}
 """
     raw = await async_generate_content(prompt)
     if raw.startswith('```'):
