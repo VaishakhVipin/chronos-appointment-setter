@@ -185,12 +185,26 @@ async def twilio_voice(request: Request):
             say = Element("Say")
             say.text = "Welcome to Chronos! Please speak after the beep."
             response.append(say)
+        # Always add a Gather for the next turn
+        gather = Element("Gather", {
+            "input": "speech",
+            "action": "/twilio/voice",
+            "method": "POST",
+            "timeout": "5"
+        })
+        gather_say = Element("Say")
+        gather_say.text = "What would you like to do next?"
+        gather.append(gather_say)
+        response.append(gather)
     else:
         # User has spoken, process their utterance
         from core.agent import agent_loop
         result = await agent_loop(user_speech, session_id=call_sid)
-        # Save TTS file path for playback
         tts_path = result.get("tts_path")
+        should_hangup = False
+        # If the agent determines the conversation is over or user is disqualified, hang up
+        if result.get("intent") == "cancel_call" or (result.get("qualification") and not result["qualification"].get("qualified")):
+            should_hangup = True
         if tts_path:
             play = Element("Play")
             base_url = os.getenv("SERVER_URL", "https://your-ngrok-or-server-url")
@@ -200,18 +214,21 @@ async def twilio_voice(request: Request):
             say = Element("Say")
             say.text = result.get("text", "Sorry, I didn't catch that.")
             response.append(say)
-
-    # Always add a Gather for the next turn
-    gather = Element("Gather", {
-        "input": "speech",
-        "action": "/twilio/voice",
-        "method": "POST",
-        "timeout": "5"
-    })
-    gather_say = Element("Say")
-    gather_say.text = "What would you like to do next?"
-    gather.append(gather_say)
-    response.append(gather)
+        if should_hangup:
+            hangup = Element("Hangup")
+            response.append(hangup)
+        else:
+            # Always add a Gather for the next turn
+            gather = Element("Gather", {
+                "input": "speech",
+                "action": "/twilio/voice",
+                "method": "POST",
+                "timeout": "5"
+            })
+            gather_say = Element("Say")
+            gather_say.text = "What would you like to do next?"
+            gather.append(gather_say)
+            response.append(gather)
 
     xml_str = tostring(response, encoding="unicode")
     return PlainTextResponse(xml_str, media_type="application/xml")
