@@ -210,6 +210,9 @@ async def twilio_voice(request: Request):
             base_url = os.getenv("SERVER_URL", "https://your-ngrok-or-server-url")
             play.text = f"{base_url}/audio/{os.path.basename(tts_path)}"
             response.append(play)
+            # Add a pause to keep the call alive after playing audio
+            pause = Element("Pause", {"length": "60"})
+            response.append(pause)
         else:
             say = Element("Say")
             say.text = result.get("text", "Sorry, I didn't catch that.")
@@ -230,7 +233,9 @@ async def twilio_voice(request: Request):
             gather.append(gather_say)
             response.append(gather)
 
+    print("=== /twilio/voice endpoint hit ===")
     xml_str = tostring(response, encoding="unicode")
+    print("[twilio] TwiML response:\n", xml_str)
     return PlainTextResponse(xml_str, media_type="application/xml")
 
 @router.post("/twilio/voice/recording", name="twilio_voice_recording")
