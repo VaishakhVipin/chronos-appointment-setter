@@ -1,4 +1,4 @@
-from fastapi import APIRouter, WebSocket, Request, Response
+from fastapi import APIRouter, WebSocket, Request, Response, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from xml.etree.ElementTree import Element, tostring
 import asyncio
@@ -10,6 +10,11 @@ from datetime import datetime, timedelta
 from services.gmail import send_email
 from dotenv import load_dotenv
 load_dotenv()
+import base64
+import httpx
+import websockets
+import numpy as np
+from scipy.signal import resample
 
 router = APIRouter()
 
@@ -37,22 +42,101 @@ async def handle_stream(websocket: WebSocket):
         await websocket.close()
         print("🔴 WebSocket closed")
 
+@router.websocket("/twilio/stream")
+async def twilio_stream(websocket: WebSocket):
+    await websocket.accept()
+    print("[twilio] WebSocket connection accepted")
+    try:
+        # 1. Get AssemblyAI temporary token
+        token_resp = httpx.post(
+            "https://streaming.assemblyai.com/v3/token?expires_in_seconds=600",
+            headers={"authorization": os.getenv("ASSEMBLYAI_API_KEY")}
+        )
+        token = token_resp.json()["token"]
+        print(f"[assemblyai] Got streaming token: {token}")
+        # 2. Connect to AssemblyAI streaming API
+        aai_ws_url = f"wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&formatted_finals=true&token={token}"
+        async with websockets.connect(aai_ws_url) as aai_ws:
+            print("[assemblyai] Connected to streaming API")
+            try:
+                async def recv_aai():
+                    async for msg in aai_ws:
+                        data = json.loads(msg)
+                        if data.get("text"):
+                            print(f"[assemblyai] Transcript: {data['text']}")
+                recv_task = asyncio.create_task(recv_aai())
+                audio_buffer = b""
+                MIN_CHUNK_SIZE = 1600  # 50ms at 16kHz, 16-bit mono
+                while True:
+                    msg = await websocket.receive_text()
+                    print("[twilio] Received message:", msg)  # Log every incoming message
+                    data = json.loads(msg)
+                    if data.get("event") == "media":
+                        # Twilio sends base64-encoded mulaw or PCM audio
+                        audio_b64 = data["media"]["payload"]
+                        audio_bytes = base64.b64decode(audio_b64)
+                        # --- BEGIN RESAMPLING LOGIC ---
+                        input_sample_rate = 8000  # <-- set this to actual rate if different
+                        if input_sample_rate != 16000:
+                            import numpy as np
+                            from scipy.signal import resample
+                            input_pcm = np.frombuffer(audio_bytes, dtype=np.int16)
+                            output_pcm = resample(input_pcm, int(len(input_pcm) * 16000 / input_sample_rate)).astype(np.int16)
+                            audio_bytes_16k = output_pcm.tobytes()
+                        else:
+                            audio_bytes_16k = audio_bytes
+                        # --- END RESAMPLING LOGIC ---
+                        # Buffer and send only >=50ms chunks
+                        audio_buffer += audio_bytes_16k
+                        while len(audio_buffer) >= MIN_CHUNK_SIZE:
+                            chunk = audio_buffer[:MIN_CHUNK_SIZE]
+                            await aai_ws.send(chunk)
+                            audio_buffer = audio_buffer[MIN_CHUNK_SIZE:]
+                    elif data.get("event") == "stop":
+                        print("[twilio] Stream stopped by Twilio")
+                        # Send any remaining audio in the buffer
+                        if audio_buffer:
+                            await aai_ws.send(audio_buffer)
+                            audio_buffer = b""
+                        break
+            except WebSocketDisconnect:
+                print("[twilio] WebSocket disconnected")
+            except Exception as e:
+                print("[twilio/stream] Exception:", e)
+                import traceback; traceback.print_exc()
+            finally:
+                await websocket.close()
+                if 'recv_task' in locals():
+                    recv_task.cancel()
+                    try:
+                        await recv_task
+                    except Exception:
+                        pass
+                print("[twilio/stream] WebSocket closed")
+        print("[twilio] WebSocket closed")
+    except Exception as e:
+        print("[twilio/stream] Outer exception:", e)
+        import traceback; traceback.print_exc()
+        await websocket.close()
+        print("[twilio/stream] WebSocket closed (outer)")
+
 @router.post("/twilio/voice")
 async def twilio_voice(request: Request):
-    # Respond with TwiML to greet and record the call
+    import os
     response = Element("Response")
     say = Element("Say")
-    say.text = "Hello! This call will be recorded for scheduling. Please state your name and reason for calling after the beep."
+    say.text = "Welcome to Chronos! Please speak after the beep."
     response.append(say)
-    record = Element("Record", {
-        "action": request.url_for("twilio_voice_recording"),
-        "method": "POST",
-        "maxLength": "120",
-        "playBeep": "true"
+    start = Element("Start")
+    base_ws_url = os.getenv("SERVER_URL", "wss://your-ngrok-or-server-url")
+    stream_url = f"{base_ws_url}/twilio/stream"
+    stream = Element("Stream", {
+        "url": stream_url
     })
-    response.append(record)
-    hangup = Element("Hangup")
-    response.append(hangup)
+    start.append(stream)
+    response.append(start)
+    pause = Element("Pause", {"length": "60"})
+    response.append(pause)
     xml_str = tostring(response, encoding="unicode")
     return PlainTextResponse(xml_str, media_type="application/xml")
 
