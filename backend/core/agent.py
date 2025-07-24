@@ -100,9 +100,9 @@ def get_session_state(session_id):
             "errors": [],
             "last_booking": None,  # Track last booking per session
             "cancelled": False,
-            "last_intent_time": None, # Added for duplicate intent check
-            "last_user_utterance": None, # Added for duplicate intent check
-            "last_gemini_response": None # Added for router response template
+            "qualified": None,     # Cache qualification result
+            "last_user_utterance": None,  # Cache last user input
+            "last_intent_result": None,   # Cache last intent/slot/duration
         }
     return SESSION_MEMORY[session_id]
 
@@ -197,25 +197,32 @@ async def agent_loop(user_utterance: str, session_id: str = 'simulate_call_user_
                 "session_id": session_id
             }
         # --- END ROUTER ---
-        # 1. Qualification step
-        qualification = await classify_qualification(user_utterance, BUSINESS_CONTEXT, QUALIFICATION_PROFILE)
-        print(f"[agent] Qualification: {qualification}")
-        # 2. Run Gemini (intent/slot extraction)
-        intent, slot, duration = await parse_intent(user_utterance)
-        print(f"[agent] Gemini intent: {intent}, slot: {slot}, duration: {duration}")
+        # 1. Qualification step (cache)
+        if state.get("qualified") is not None and user_utterance == state.get("last_user_utterance"):
+            qualification = state["qualified"]
+            print(f"[agent] (cached) Qualification: {qualification}")
+        else:
+            qualification = await classify_qualification(user_utterance, BUSINESS_CONTEXT, QUALIFICATION_PROFILE)
+            print(f"[agent] Qualification: {qualification}")
+            state["qualified"] = qualification
+        # 2. Intent/slot extraction (cache)
+        if user_utterance == state.get("last_user_utterance") and state.get("last_intent_result") is not None:
+            intent, slot, duration = state["last_intent_result"]
+            print(f"[agent] (cached) Gemini intent: {intent}, slot: {slot}, duration: {duration}")
+        else:
+            intent, slot, duration = await parse_intent(user_utterance)
+            print(f"[agent] Gemini intent: {intent}, slot: {slot}, duration: {duration}")
+            state["last_intent_result"] = (intent, slot, duration)
         contact = pick_contact()
-        now = time.time()
-        # Update session state for router
         state["last_intent"] = intent
-        state["last_intent_time"] = now
-        state["last_user_utterance"] = user_utterance.strip()
         state["last_slot"] = slot
         state["last_contact"] = contact["name"]
         state["errors"] = []
-        state["last_qualification"] = qualification
+        state["last_user_utterance"] = user_utterance
         response_text = ""
         booking_confirmation = None
         error = None
+        now = time.time()
         # 3. Special case: gratitude/thanks utterance (handled by router now)
         # 4. Routing logic
         if qualification["qualified"]:
