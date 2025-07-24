@@ -44,16 +44,25 @@ async def async_generate_content(prompt, streaming=False):
     _gemini_cache[key] = raw
     return raw
 
-# --- INTENT & SLOT EXTRACTION (DETAILED GUIDELINES, CONCISE OUTPUT) ---
+# --- INTENT PARSING ---
 async def parse_intent(user_input: str):
     prompt = f"""
-You are an expert AI scheduling agent. Your job is to extract the user's intent (book_call, cancel_call, general_query), the most likely requested time (plain text), and the call duration (e.g. '15m', '30m', '1 hour', or null if not specified) from the following message. Be accurate and context-aware.
+You are a highly skilled, consultative sales strategist for a B2B growth agency. Your job is to:
+- Listen deeply to the caller's needs, goals, and pain points.
+- Extract the user's intent: are they looking to book a call, cancel, or just asking questions?
+- If the user's needs are unclear, ask a smart, open-ended follow-up (e.g., 'Can you tell me a bit more about your current challenges?').
+- Only suggest a call if you genuinely believe it will help the caller.
+- Never sound pushy—be consultative, insightful, and human.
 
-User message:
+Here's the user input:
 {user_input}
 
-Respond in JSON:
-{{"intent":..., "datetime":..., "duration":...}}
+Respond ONLY in this JSON format:
+{
+  "intent": "...",
+  "datetime": "...",
+  "duration": "..."  // e.g., '15m', '30m', '1 hour', or null
+}
 """
     raw = await async_generate_content(prompt)
     if raw.startswith('```'):
@@ -69,26 +78,30 @@ Respond in JSON:
         print("🔴 Raw:", raw)
         return "unknown", "unknown", None
 
-# --- LLM REPLY GENERATION (DETAILED GUIDELINES, CONCISE OUTPUT) ---
-async def generate_llm_reply(intent, slot, contact, business_context, error=None, timezone=None):
+# --- LLM REPLY GENERATION ---
+async def generate_llm_reply(intent, slot, contact, business_context, error=None):
+    import random
     prompt = f"""
-You are an AI scheduling assistant for {business_context['seller']}.
-Your job is to help users book, reschedule, or cancel calls as efficiently as possible.
-Guidelines:
-- Always confirm or mention the time zone when discussing or confirming a booking.
-- Be direct, concise, and only ask for what is needed to complete the booking.
-- Do not repeat information or add unnecessary politeness.
-- Never generate a verbose or epic response; keep it short and actionable.
-- If the user is booking, confirm the time, date, and time zone.
+You are a highly skilled, consultative sales strategist for {business_context['seller']}.
+Your job is to:
+- Listen deeply to the caller's needs, goals, and pain points.
+- Respond with empathy, insight, and helpfulness.
+- Ask clarifying questions if you need more info.
+- Only suggest a call if you genuinely believe it will help the caller.
+- If the user is not a fit, explain why and offer a helpful next step or resource.
+- Never sound pushy—be consultative, insightful, and human.
 
+Context:
 Intent: {intent}
 Slot: {slot}
-Contact: {contact['name']} ({contact['role']})
 Offer: {business_context['offer']}
-Time zone: {timezone or 'America/New_York'}
+Seller: {business_context['seller']}
+Contact: {contact['name']} ({contact['role']})
+
+{f'Error: {error}' if error else ''}
+
+Respond with a single, natural, human-sounding sentence.
 """
-    if error:
-        prompt += f"\nError: {error}\nRespond with a short, actionable next step."
     raw = await async_generate_content(prompt)
     if raw.startswith('```'):
         raw = raw.split('\n', 1)[-1]
@@ -97,12 +110,15 @@ Time zone: {timezone or 'America/New_York'}
         raw = raw.strip()
     return raw
 
-# --- QUALIFICATION CLASSIFICATION (DEEPER, STRICTER) ---
+# --- QUALIFICATION CLASSIFICATION (CONSULTATIVE, NUANCED) ---
 async def classify_qualification(user_utterance: str, business_context, qualification_profile):
     prompt = f"""
-You are a lead qualification AI for {business_context['seller']}.
+You are a sales qualification expert for {business_context['seller']}.
 Guidelines:
-- Only qualify if the user CLEARLY matches ALL of the ideal client profile:
+- Listen for signals of business type, revenue, and pain points, but also use your judgment: if the user seems promising but is missing one detail, ask a follow-up question.
+- If the user is not a fit, explain why in a friendly, constructive way.
+- If the user is confused or not ready, offer to answer questions or provide resources instead of pushing for a call.
+- Only qualify if the user CLEARLY matches the ideal client profile:
   - Type: {qualification_profile['ideal_user']['type']}
   - Revenue: {qualification_profile['ideal_user']['revenue']}
   - Pain points: {', '.join(qualification_profile['ideal_user']['pain_points'])}
@@ -114,11 +130,11 @@ Guidelines:
 User message: "{user_utterance}"
 
 Respond ONLY in this JSON format:
-{{
+{
   "qualified": true/false,
   "reason": "...",
   "route_to": null or "Aryan" or "Ignore"
-}}
+}
 """
     raw = await async_generate_content(prompt)
     if raw.startswith('```'):
