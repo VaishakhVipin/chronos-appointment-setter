@@ -102,12 +102,12 @@ async def classify_qualification(user_utterance: str, business_context, qualific
     prompt = f"""
 You are a lead qualification AI for {business_context['seller']}.
 Guidelines:
-- Consider the user's business type, revenue, pain points, and intent.
-- Only qualify if the user matches the ideal client profile:
+- Only qualify if the user CLEARLY matches ALL of the ideal client profile:
   - Type: {qualification_profile['ideal_user']['type']}
   - Revenue: {qualification_profile['ideal_user']['revenue']}
   - Pain points: {', '.join(qualification_profile['ideal_user']['pain_points'])}
-- Be strict: do not qualify if any major criteria are missing or ambiguous.
+- If the message is generic, random, not business-related, or does not mention relevant business context, DO NOT qualify.
+- If in doubt, disqualify and explain why.
 - If not qualified, route to the correct contact or ignore as appropriate.
 - Provide a short explanation of your reasoning in the JSON response.
 

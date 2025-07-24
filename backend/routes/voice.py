@@ -1,5 +1,5 @@
 from fastapi import APIRouter, WebSocket, Request, Response, WebSocketDisconnect
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, FileResponse
 from xml.etree.ElementTree import Element, tostring
 import asyncio
 from services.assembly import stream_transcribe
@@ -15,6 +15,7 @@ import httpx
 import websockets
 import numpy as np
 from scipy.signal import resample
+from fastapi import Form
 
 router = APIRouter()
 
@@ -52,7 +53,11 @@ async def twilio_stream(websocket: WebSocket):
             "https://streaming.assemblyai.com/v3/token?expires_in_seconds=600",
             headers={"authorization": os.getenv("ASSEMBLYAI_API_KEY")}
         )
-        token = token_resp.json()["token"]
+        print("[assemblyai] Token response:", token_resp.status_code, token_resp.text)
+        token_json = token_resp.json()
+        token = token_json.get("token")
+        if not token:
+            raise Exception(f"Failed to get AssemblyAI token: {token_json}")
         print(f"[assemblyai] Got streaming token: {token}")
         # 2. Connect to AssemblyAI streaming API
         aai_ws_url = f"wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&formatted_finals=true&token={token}"
@@ -60,10 +65,38 @@ async def twilio_stream(websocket: WebSocket):
             print("[assemblyai] Connected to streaming API")
             try:
                 async def recv_aai():
+                    from services.gpt import parse_intent, generate_llm_reply
+                    from services.tts import speak
+                    business_context = {
+                        "offer": "30-minute growth strategy call",
+                        "offer_value": "Diagnose your bottlenecks + outline 3 ways to grow revenue",
+                        "seller": "Obelisk Acquisitions",
+                        "contacts": [
+                            {"name": "Vaishakh", "role": "Closer / Strategy Head"},
+                            {"name": "Aryan", "role": "Fulfillment / Onboarding"}
+                        ]
+                    }
+                    contact = business_context["contacts"][0]
                     async for msg in aai_ws:
                         data = json.loads(msg)
-                        if data.get("text"):
-                            print(f"[assemblyai] Transcript: {data['text']}")
+                        if data.get("message_type") == "FinalTranscript" and data.get("text"):
+                            transcript = data["text"]
+                            print(f"[assemblyai] Final transcript: {transcript}")
+                            # Pass transcript to Gemini for intent/slot extraction
+                            intent, slot, duration = await parse_intent(transcript)
+                            print(f"[gemini] Parsed intent: {intent}, slot: {slot}, duration: {duration}")
+                            # Generate reply using Gemini
+                            reply = await generate_llm_reply(
+                                intent=intent,
+                                slot=slot,
+                                contact=contact,
+                                business_context=business_context,
+                                error=None
+                            )
+                            print(f"[gemini] Reply: {reply}")
+                            # Synthesize reply with Deepgram TTS
+                            tts_path = await speak(reply)
+                            print(f"[tts] Deepgram TTS file: {tts_path}")
                 recv_task = asyncio.create_task(recv_aai())
                 audio_buffer = b""
                 MIN_CHUNK_SIZE = 1600  # 50ms at 16kHz, 16-bit mono
@@ -120,23 +153,66 @@ async def twilio_stream(websocket: WebSocket):
         await websocket.close()
         print("[twilio/stream] WebSocket closed (outer)")
 
+# Serve TTS audio files from the mock/ directory
+@router.get("/audio/{filename}")
+def serve_audio(filename: str):
+    audio_path = os.path.join(os.path.dirname(__file__), "..", "mock", filename)
+    if not os.path.exists(audio_path):
+        return PlainTextResponse("File not found", status_code=404)
+    return FileResponse(audio_path, media_type="audio/wav")
+
+# Update /twilio/voice to play the latest TTS audio file
 @router.post("/twilio/voice")
 async def twilio_voice(request: Request):
     import os
+    from glob import glob
+    form = await request.form()
+    call_sid = form.get("CallSid") or "simulate_call_user_1"
+    user_speech = form.get("SpeechResult")
     response = Element("Response")
-    say = Element("Say")
-    say.text = "Welcome to Chronos! Please speak after the beep."
-    response.append(say)
-    start = Element("Start")
-    base_ws_url = os.getenv("SERVER_URL", "wss://your-ngrok-or-server-url")
-    stream_url = f"{base_ws_url}/twilio/stream"
-    stream = Element("Stream", {
-        "url": stream_url
+    mock_dir = os.path.join(os.path.dirname(__file__), "..", "mock")
+
+    # If this is the first turn, play the latest TTS or a welcome message
+    if not user_speech:
+        tts_files = sorted(glob(os.path.join(mock_dir, "response_*.wav")), key=os.path.getmtime, reverse=True)
+        if tts_files:
+            latest_tts = os.path.basename(tts_files[0])
+            play = Element("Play")
+            base_url = os.getenv("SERVER_URL", "https://your-ngrok-or-server-url")
+            play.text = f"{base_url}/audio/{latest_tts}"
+            response.append(play)
+        else:
+            say = Element("Say")
+            say.text = "Welcome to Chronos! Please speak after the beep."
+            response.append(say)
+    else:
+        # User has spoken, process their utterance
+        from core.agent import agent_loop
+        result = await agent_loop(user_speech, session_id=call_sid)
+        # Save TTS file path for playback
+        tts_path = result.get("tts_path")
+        if tts_path:
+            play = Element("Play")
+            base_url = os.getenv("SERVER_URL", "https://your-ngrok-or-server-url")
+            play.text = f"{base_url}/audio/{os.path.basename(tts_path)}"
+            response.append(play)
+        else:
+            say = Element("Say")
+            say.text = result.get("text", "Sorry, I didn't catch that.")
+            response.append(say)
+
+    # Always add a Gather for the next turn
+    gather = Element("Gather", {
+        "input": "speech",
+        "action": "/twilio/voice",
+        "method": "POST",
+        "timeout": "5"
     })
-    start.append(stream)
-    response.append(start)
-    pause = Element("Pause", {"length": "60"})
-    response.append(pause)
+    gather_say = Element("Say")
+    gather_say.text = "What would you like to do next?"
+    gather.append(gather_say)
+    response.append(gather)
+
     xml_str = tostring(response, encoding="unicode")
     return PlainTextResponse(xml_str, media_type="application/xml")
 

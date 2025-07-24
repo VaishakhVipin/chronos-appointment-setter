@@ -11,7 +11,7 @@ def speak_sync(text: str, filename: str = "response.wav") -> str:
         return ""
     url = (
         "https://api.deepgram.com/v1/speak"
-        "?model=aura-asteria-en"
+        "?model=aura-orion-en"
         "&encoding=linear16"
         "&sample_rate=16000"
     )
